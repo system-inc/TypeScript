@@ -29,6 +29,7 @@ type extendsResult struct {
 	exclude             []any
 	files               []any
 	contentMappers      []any
+	sourceExtensions    []any
 	compileOnSave       bool
 	extendedSourceFiles collections.Set[string]
 }
@@ -1079,6 +1080,9 @@ func parseConfig(
 			if extendedRawMap, ok := extendsRaw.(*collections.OrderedMap[string, any]); ok && extendedRawMap.Has("contentMappers") {
 				result.contentMappers, _ = extendedRawMap.GetOrZero("contentMappers").([]any)
 			}
+			if extendedRawMap, ok := extendsRaw.(*collections.OrderedMap[string, any]); ok && extendedRawMap.Has("sourceExtensions") {
+				result.sourceExtensions, _ = extendedRawMap.GetOrZero("sourceExtensions").([]any)
+			}
 			if extendedRawMap, ok := extendsRaw.(*collections.OrderedMap[string, any]); ok && extendedRawMap.Has("compileOnSave") {
 				if compileOnSave, ok := extendedRawMap.GetOrZero("compileOnSave").(bool); ok {
 					result.compileOnSave = compileOnSave
@@ -1112,6 +1116,9 @@ func parseConfig(
 		}
 		if result.contentMappers != nil && !ownConfig.raw.(*collections.OrderedMap[string, any]).Has("contentMappers") {
 			ownConfig.raw.(*collections.OrderedMap[string, any]).Set("contentMappers", result.contentMappers)
+		}
+		if result.sourceExtensions != nil && !ownConfig.raw.(*collections.OrderedMap[string, any]).Has("sourceExtensions") {
+			ownConfig.raw.(*collections.OrderedMap[string, any]).Set("sourceExtensions", result.sourceExtensions)
 		}
 		if result.compileOnSave && !ownConfig.raw.(*collections.OrderedMap[string, any]).Has("compileOnSave") {
 			ownConfig.raw.(*collections.OrderedMap[string, any]).Set("compileOnSave", result.compileOnSave)
@@ -1367,9 +1374,39 @@ func parseJsonConfigFileContentWorker(
 		})
 	}
 
+	// Source extensions: files TypeScript reads as source under their own names, opted into by the config
+	// (a top-level key, so tsc and stock tsgo ignore it). Each must begin with a dot, must not be one of
+	// TypeScript's own, appears once, and is not also a content mapper's.
+	var sourceExtensions []string
+	sourceExtensionsOfRaw := getPropFromRaw("sourceExtensions", isStringValue, "string")
+	seenSourceExtensions := map[string]struct{}{}
+	for _, element := range sourceExtensionsOfRaw.sliceValue {
+		extension, isString := element.(string)
+		if !isString {
+			continue
+		}
+		canonicalExt := canonicalExtension(extension)
+		_, mapped := seenContentMapperExtensions[canonicalExt]
+		_, seen := seenSourceExtensions[canonicalExt]
+		switch {
+		case !strings.HasPrefix(extension, ".") || len(extension) < 2,
+			slices.ContainsFunc(nativeExtensions, func(nativeExtension string) bool { return strings.EqualFold(nativeExtension, extension) }),
+			mapped, seen:
+			errors = append(errors, ast.NewCompilerDiagnostic(diagnostics.Argument_for_0_option_must_be_Colon_1, "sourceExtensions",
+				"extensions that begin with '.', are not TypeScript's own or a content mapper's, and appear once ("+extension+" is not)"))
+		default:
+			seenSourceExtensions[canonicalExt] = struct{}{}
+			sourceExtensions = append(sourceExtensions, extension)
+		}
+	}
+	extraExtensions := contentMapperExtensions
+	if len(sourceExtensions) > 0 {
+		extraExtensions = slices.Concat(contentMapperExtensions, sourceExtensions)
+	}
+
 	getFileNames := func(basePath string) ([]string, int) {
 		parsedConfigOptions := parsedConfig.options
-		fileNames, literalFileNamesLen := getFileNamesFromConfigSpecs(configFileSpecs, basePath, parsedConfigOptions, host.FS(), contentMapperExtensions)
+		fileNames, literalFileNamesLen := getFileNamesFromConfigSpecs(configFileSpecs, basePath, parsedConfigOptions, host.FS(), extraExtensions)
 		if shouldReportNoInputFiles(fileNames, canJsonReportNoInputFiles(rawConfig), resolutionStack) {
 			includeSpecs := configFileSpecs.includeSpecs
 			excludeSpecs := configFileSpecs.excludeSpecs
@@ -1429,6 +1466,7 @@ func parseJsonConfigFileContentWorker(
 			FileNames:         fileNames,
 			ProjectReferences: getProjectReferences(basePathForFileNames),
 			ContentMappers:    contentMappers,
+			SourceExtensions:  sourceExtensions,
 		},
 		ConfigFile:    sourceFile,
 		Raw:           parsedConfig.raw,

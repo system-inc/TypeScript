@@ -1009,6 +1009,10 @@ var commandLineOptionElements = map[string]*CommandLineOption{
 		Name: "contentMappers",
 		Kind: CommandLineOptionTypeObject,
 	},
+	"sourceExtensions": {
+		Name: "sourceExtensions",
+		Kind: CommandLineOptionTypeString,
+	},
 	"files": {
 		Name: "files",
 		Kind: CommandLineOptionTypeString,
@@ -1132,6 +1136,10 @@ var tsconfigRootOptionsMap = &CommandLineOption{
 		},
 		{
 			Name: "contentMappers",
+			Kind: CommandLineOptionTypeList,
+		},
+		{
+			Name: "sourceExtensions",
 			Kind: CommandLineOptionTypeList,
 		},
 		{

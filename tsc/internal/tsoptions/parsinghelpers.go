@@ -173,6 +173,9 @@ func parseJsonToStringKey(json any) *collections.OrderedMap[string, any] {
 		if v, ok := m.Get("contentMappers"); ok {
 			result.Set("contentMappers", v)
 		}
+		if v, ok := m.Get("sourceExtensions"); ok {
+			result.Set("sourceExtensions", v)
+		}
 		if v, ok := m.Get("extends"); ok {
 			if str, ok := v.(string); ok {
 				result.Set("extends", []any{str})

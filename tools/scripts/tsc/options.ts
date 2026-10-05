@@ -1854,6 +1854,7 @@ export const options: OptionsModel = {
         { name: "extends", kind: "ListOrElement", variable: "extendsOptionDeclaration", category: diagnostic("File Management"), elementOptions: "extends" },
         { name: "references", kind: "List" },
         { name: "contentMappers", kind: "List", documentationAnchor: false },
+        { name: "sourceExtensions", kind: "List", documentationAnchor: false },
         { name: "files", kind: "List" },
         { name: "include", kind: "List" },
         { name: "exclude", kind: "List" },
@@ -1898,6 +1899,10 @@ export const options: OptionsModel = {
         contentMappers: {
             name: "contentMappers",
             kind: "Object",
+        },
+        sourceExtensions: {
+            name: "sourceExtensions",
+            kind: "String",
         },
         files: {
             name: "files",

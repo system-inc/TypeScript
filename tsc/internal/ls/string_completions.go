@@ -1036,7 +1036,7 @@ func (l *LanguageService) getExtensionOptions(
 	mode core.ResolutionMode,
 	checker *checker.Checker,
 ) *extensionOptions {
-	extensionsToSearch := getSupportedExtensionsForModuleResolution(options, l.GetProgram().CommandLine().ContentMapperExtensions(), checker)
+	extensionsToSearch := getSupportedExtensionsForModuleResolution(options, l.GetProgram().CommandLine().ExtraExtensions(), checker)
 
 	return &extensionOptions{
 		extensionsToSearch:  extensionsToSearch,

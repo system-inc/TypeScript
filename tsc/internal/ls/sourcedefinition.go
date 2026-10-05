@@ -156,7 +156,7 @@ func (l *LanguageService) newSourceDefResolver(
 			Host:            program.Host(),
 			CompilerOptions: noDtsOptions,
 			TypingsLocation: program.GetGlobalTypingsCacheLocation(),
-			ExtraExtensions: program.CommandLine().ContentMapperExtensions(),
+			ExtraExtensions: program.CommandLine().ExtraExtensions(),
 		}),
 	}
 }

@@ -29,7 +29,7 @@ const (
 // built-in patterns with the extensions registered by its content mappers so that created
 // content-mapped files are recognized as possible root files.
 func (p *ParsedCommandLine) fileGlobPatterns() (fileGlob string, recursiveFileGlob string) {
-	mapperExtensions := p.ContentMapperExtensions()
+	mapperExtensions := p.ExtraExtensions()
 	if len(mapperExtensions) == 0 {
 		return fileGlobPattern, recursiveFileGlobPattern
 	}
@@ -361,6 +361,26 @@ func (p *ParsedCommandLine) ContentMapperExtensions() []string {
 	})
 }
 
+// SourceExtensions returns the extensions whose files the config's program reads as TypeScript source
+// under their own names (the top-level "sourceExtensions" key).
+func (p *ParsedCommandLine) SourceExtensions() []string {
+	if p == nil || p.ParsedConfig == nil {
+		return nil
+	}
+	return p.ParsedConfig.SourceExtensions
+}
+
+// ExtraExtensions returns every extension beyond TypeScript's own that the config's program enumerates,
+// loads and resolves: its content mappers' and its source extensions. Whether a file is handed to a
+// content mapper is decided by ContentMapperExtensions alone.
+func (p *ParsedCommandLine) ExtraExtensions() []string {
+	sourceExtensions := p.SourceExtensions()
+	if len(sourceExtensions) == 0 {
+		return p.ContentMapperExtensions()
+	}
+	return slices.Concat(p.ContentMapperExtensions(), sourceExtensions)
+}
+
 // GetContentMapperForFileName returns the configured content mapper whose extensions include fileName,
 // or nil if no content mapper is registered for the file's extension.
 func (p *ParsedCommandLine) GetContentMapperForFileName(fileName string) *contentmapper.Mapper {
@@ -469,7 +489,7 @@ func (p *ParsedCommandLine) ReloadFileNamesOfParsedCommandLine(fs vfs.FS) *Parse
 		p.GetCurrentDirectory(),
 		p.CompilerOptions(),
 		fs,
-		p.ContentMapperExtensions(),
+		p.ExtraExtensions(),
 	)
 	parsedConfig.FileNames = fileNames
 	parsedCommandLine := ParsedCommandLine{

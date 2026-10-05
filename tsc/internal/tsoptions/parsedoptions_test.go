@@ -35,6 +35,7 @@ func TestParsedOptionsEquality(t *testing.T) {
 				Name: "mapper", Version: "1", Exec: []string{"node", "mapper.js"}, CompilerOptions: []string{"target"}, DynamicConfig: true,
 				PackageDirectory: "/node_modules/mapper", ContributionID: "extension",
 			}, nil},
+			SourceExtensions: []string{".a"},
 		}
 	}
 	check(t, makeOptions(), makeOptions())

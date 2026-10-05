@@ -154,7 +154,7 @@ func processAllProgramFiles(
 ) (processedFiles, *module.ResolutionData, error) {
 	compilerOptions := opts.Config.CompilerOptions()
 	rootFiles := opts.Config.FileNames()
-	supportedExtensions := tsoptions.GetSupportedExtensions(compilerOptions, opts.Config.ContentMapperExtensions())
+	supportedExtensions := tsoptions.GetSupportedExtensions(compilerOptions, opts.Config.ExtraExtensions())
 	supportedExtensionsWithJsonIfResolveJsonModule := tsoptions.GetSupportedExtensionsWithJsonIfResolveJsonModule(compilerOptions, supportedExtensions)
 	var maxNodeModuleJsDepth int
 	if p := opts.Config.CompilerOptions().MaxNodeModuleJsDepth; p != nil {
@@ -184,7 +184,7 @@ func processAllProgramFiles(
 		CompilerOptions: compilerOptions,
 		TypingsLocation: opts.TypingsLocation,
 		ProjectName:     opts.ProjectName,
-		ExtraExtensions: opts.Config.ContentMapperExtensions(),
+		ExtraExtensions: opts.Config.ExtraExtensions(),
 	}
 	if opts.CreateModuleResolver != nil {
 		loader.resolver = opts.CreateModuleResolver(resolverOptions)

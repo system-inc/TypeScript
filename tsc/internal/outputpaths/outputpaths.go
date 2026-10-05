@@ -99,10 +99,14 @@ func isContentMappedFileName(fileName string, host OutputPathsHost) bool {
 }
 
 func GetOutputJSFileNameWorker(inputFileName string, options *core.CompilerOptions, host OutputPathsHost) string {
-	return tspath.ChangeExtension(
-		getOutputPathWithoutChangingExtension(inputFileName, options.OutDir, host),
-		GetOutputExtension(inputFileName, options.Jsx),
-	)
+	outputPath := getOutputPathWithoutChangingExtension(inputFileName, options.OutDir, host)
+	// An extension TypeScript doesn't strip (a config's source extension, X.a) keeps it and gains the output
+	// extension, X.a.js, as getOwnEmitOutputFilePath computes for the emit itself. ChangeExtension would
+	// return the input path unchanged, naming the source as its own output.
+	if tspath.TryGetExtensionFromPath(outputPath) == "" {
+		return outputPath + GetOutputExtension(inputFileName, options.Jsx)
+	}
+	return tspath.ChangeExtension(outputPath, GetOutputExtension(inputFileName, options.Jsx))
 }
 
 func GetOutputDeclarationFileNameWorker(inputFileName string, options *core.CompilerOptions, host OutputPathsHost) string {

@@ -105,6 +105,19 @@
             "description": "External content mapper packages and the file extensions they handle. Execution must be enabled separately with --runExternalCode.",
             "markdownDescription": "External content mapper packages and the file extensions they handle. Execution must be enabled separately with --runExternalCode."
         },
+        "sourceExtensions": {
+            "anyOf": [
+                {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                {
+                    "type": "null"
+                }
+            ]
+        },
         "files": {
             "anyOf": [
                 {
