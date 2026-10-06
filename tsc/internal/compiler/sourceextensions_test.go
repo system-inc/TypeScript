@@ -9,6 +9,7 @@ import (
 	"github.com/microsoft/TypeScript/tsc/internal/core"
 	"github.com/microsoft/TypeScript/tsc/internal/outputpaths"
 	"github.com/microsoft/TypeScript/tsc/internal/tsoptions"
+	"github.com/microsoft/TypeScript/tsc/internal/tspath"
 	"github.com/microsoft/TypeScript/tsc/internal/vfs/vfstest"
 	"gotest.tools/v3/assert"
 )
@@ -16,8 +17,9 @@ import (
 // sourceExtensionsProgram builds the program /src/tsconfig.json defines over files.
 func sourceExtensionsProgram(t *testing.T, files map[string]any) (*Program, *tsoptions.ParsedCommandLine, []string) {
 	t.Helper()
-	host := NewCompilerHost("/", vfstest.FromMap(files, true), "", nil, nil, nil)
-	config, configDiagnostics := tsoptions.GetParsedCommandLineOfConfigFile("/src/tsconfig.json", nil, nil, host, nil)
+	fs := vfstest.FromMap(files, tspath.CaseSensitive)
+	host := NewCompilerHost(fs, "", nil, nil, nil)
+	config, configDiagnostics := tsoptions.GetParsedCommandLineOfConfigFile(tspath.RootedFilePathFromNormalized("/src/tsconfig.json"), nil, nil, fs, nil)
 	messages := []string{}
 	for _, diagnostic := range append(configDiagnostics, config.GetConfigFileParsingDiagnostics()...) {
 		messages = append(messages, diagnostic.String())
@@ -30,8 +32,8 @@ func sourceExtensionsProgram(t *testing.T, files map[string]any) (*Program, *tso
 func fileNames(program *Program) []string {
 	names := []string{}
 	for _, file := range program.GetSourceFiles() {
-		if strings.HasPrefix(file.FileName(), "/src/") {
-			names = append(names, file.FileName())
+		if strings.HasPrefix(file.FileName().AsString(), "/src/") {
+			names = append(names, file.FileName().AsString())
 		}
 	}
 	slices.Sort(names)
@@ -67,7 +69,7 @@ func TestSourceExtensions(t *testing.T) {
 		assert.DeepEqual(t, config.SourceExtensions(), []string{".a"})
 		assert.DeepEqual(t, fileNames(program), []string{"/src/geometry.a", "/src/main.a", "/src/plain.ts"})
 
-		main := program.GetSourceFile("/src/main.a")
+		main := program.GetSourceFile(tspath.RootedFilePathFromNormalized("/src/main.a"))
 		assert.Assert(t, main != nil)
 		assert.Equal(t, main.ScriptKind, core.ScriptKindTS)
 		// The one error is the planted one, in main.a under its own name: the import resolved, so area's
@@ -75,11 +77,11 @@ func TestSourceExtensions(t *testing.T) {
 		diagnostics := program.GetSemanticDiagnostics(context.Background(), main)
 		assert.Equal(t, len(diagnostics), 1)
 		assert.Equal(t, diagnostics[0].Code(), int32(2322))
-		assert.Equal(t, diagnostics[0].File().FileName(), "/src/main.a")
+		assert.Equal(t, diagnostics[0].File().FileName().AsString(), "/src/main.a")
 		resolvedFileName := ""
-		for key, resolved := range program.GetResolvedModules()[main.Path()] {
+		for key, resolved := range program.GetResolvedModules()[main.PathKey()] {
 			if key.Name == "./geometry.a" && resolved.IsResolved() {
-				resolvedFileName = resolved.ResolvedFileName
+				resolvedFileName = resolved.ResolvedFileName.AsString()
 			}
 		}
 		assert.Equal(t, resolvedFileName, "/src/geometry.a")
@@ -99,7 +101,7 @@ func TestSourceExtensions(t *testing.T) {
 		_, config, configMessages := sourceExtensionsProgram(t, files)
 		assert.Equal(t, len(configMessages), 0, configMessages)
 		assert.DeepEqual(t, config.SourceExtensions(), []string{".a"})
-		assert.DeepEqual(t, config.FileNames(), []string{"/src/main.a", "/src/geometry.a"})
+		assert.DeepEqual(t, config.FileNames(), []tspath.RootedFilePath{"/src/main.a", "/src/geometry.a"})
 	})
 
 	t.Run("invalid entries are reported and left out", func(t *testing.T) {
@@ -121,6 +123,7 @@ func TestSourceExtensionOutputPaths(t *testing.T) {
 	}
 	program, _, _ := sourceExtensionsProgram(t, files)
 	options := program.Options()
-	assert.Equal(t, outputpaths.GetOutputJSFileName("/src/main.a", options, program), "/out/main.a.js")
-	assert.Equal(t, outputpaths.GetOutputDeclarationFileNameWorker("/src/main.a", options, program), "/out/main.d.a.ts")
+	main := tspath.RootedFilePathFromNormalized("/src/main.a")
+	assert.Equal(t, outputpaths.GetOutputJSFileName(main, options, program).AsString(), "/out/main.a.js")
+	assert.Equal(t, outputpaths.GetOutputDeclarationFileNameWorker(main, options, program).AsString(), "/out/main.d.a.ts")
 }
