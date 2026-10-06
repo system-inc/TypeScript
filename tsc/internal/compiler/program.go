@@ -139,6 +139,13 @@ type Program struct {
 	// Cached map of package names to whether they bundle types
 	packagesMapOnce sync.Once
 	packagesMap     map[string]bool
+
+	// filesByFileName is filesByPath keyed by the names the program holds its files under, so a lookup by
+	// one of those names (a resolved module's file name, which the checker resolves on every import) is a
+	// map read instead of a path canonicalization: on a case-insensitive file system ToPath lowercases the
+	// name, allocating on every call. Built on first use and read without a lock.
+	filesByFileNameOnce sync.Once
+	filesByFileName     map[string]*ast.SourceFile
 }
 
 // FileExists implements checker.Program.
@@ -2077,8 +2084,33 @@ func (p *Program) toPath(filename string) tspath.Path {
 }
 
 func (p *Program) GetSourceFile(filename string) *ast.SourceFile {
+	if file, ok := p.sourceFileByFileName(filename); ok {
+		return file
+	}
 	path := p.toPath(filename)
 	return p.GetSourceFileByPath(path)
+}
+
+// sourceFileByFileName answers GetSourceFile for a name the program holds a file or a redirect under,
+// without computing its path. A name is indexed only where its own path is the key it is filed under, so
+// a hit is exactly what filesByPath[toPath(name)] would give, and every other name is answered by toPath.
+func (p *Program) sourceFileByFileName(fileName string) (*ast.SourceFile, bool) {
+	p.filesByFileNameOnce.Do(func() {
+		index := make(map[string]*ast.SourceFile, len(p.filesByPath)+len(p.redirectFilesByPath))
+		for path, file := range p.filesByPath {
+			if p.toPath(file.FileName()) == path {
+				index[file.FileName()] = file
+			}
+		}
+		for path, redirect := range p.redirectFilesByPath {
+			if file := p.filesByPath[path]; file != nil && p.toPath(redirect.fileName) == path {
+				index[redirect.fileName] = file
+			}
+		}
+		p.filesByFileName = index
+	})
+	file, ok := p.filesByFileName[fileName]
+	return file, ok
 }
 
 func (p *Program) GetSourceFileForResolvedModule(fileName string) *ast.SourceFile {
