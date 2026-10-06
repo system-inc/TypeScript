@@ -110,6 +110,15 @@ func (r *Relation) set(key CacheHashKey, result RelationComparisonResult) {
 	r.results[key] = result
 }
 
+// setRelationResult caches a relation result. While a variance is being measured, the result may
+// rest on variances that are later discarded, so it is logged for getVariancesWorker to forget.
+func (c *Checker) setRelationResult(relation *Relation, key CacheHashKey, result RelationComparisonResult) {
+	if len(c.varianceStack) != 0 {
+		c.varianceRelationLog = append(c.varianceRelationLog, VarianceRelationEntry{relation, key})
+	}
+	relation.set(key, result)
+}
+
 func (r *Relation) size() int {
 	return len(r.results)
 }
@@ -371,7 +380,7 @@ func (c *Checker) checkTypeRelatedToEx(
 	if r.overflow {
 		// Record this relation as having failed such that we don't attempt the overflowing operation again.
 		id, _ := getRelationKey(source, target, IntersectionStateNone, relation == c.identityRelation, false /*ignoreConstraints*/)
-		relation.set(id, RelationComparisonResultFailed|RelationComparisonResultComplexityOverflow)
+		c.setRelationResult(relation, id, RelationComparisonResultFailed|RelationComparisonResultComplexityOverflow)
 		if tr := c.tracer; tr != nil {
 			tr.Instant(tracing.PhaseCheckTypes, "checkTypeRelatedTo_DepthLimit", map[string]any{"sourceId": source.id, "targetId": target.id, "depth": len(r.sourceStack), "targetDepth": len(r.targetStack)})
 		}
@@ -1331,107 +1340,209 @@ func (c *Checker) getAliasVariances(symbol *ast.Symbol) []VarianceFlags {
 // generic type are structurally compared. We infer the variance information by comparing
 // instantiations of the generic type for type arguments with known relations. The function
 // returns an empty slice when invoked recursively for the given generic type.
+//
+// Generic types can be circular, and a variance measured while a circularity is open depends on
+// where the circularity was entered: the type being re-entered reads as unknown, so whatever is
+// measured above it is measured against that assumption. To make the result independent of the
+// order in which a program is checked, the variance stack finds strongly connected regions the
+// way Tarjan's algorithm does. A variance measured while a region is open is kept provisionally,
+// for the rest of that region's measurement. When the region's root completes, the whole region
+// is known: if the root is the region's "smallest" symbol its variances are committed, and
+// otherwise every provisional variance in the region is discarded, with every relation result
+// cached while measuring it, and the region is measured again from its smallest symbol, so every
+// entry ends with the same variances.
 func (c *Checker) getVariancesWorker(symbol *ast.Symbol, typeParameters []*Type) []VarianceFlags {
 	links := c.varianceLinks.Get(symbol)
-	if links.variances == nil {
-		var traceArgs map[string]any
-		if tr := c.tracer; tr != nil {
-			traceArgs = map[string]any{"arity": len(typeParameters), "id": c.getDeclaredTypeOfSymbol(symbol).id}
-			popFn := tr.Push(tracing.PhaseCheckTypes, "getVariancesWorker", traceArgs, true)
-			defer func() {
-				formatted := make([]string, len(links.variances))
-				for i, v := range links.variances {
-					formatted[i] = v.String()
-				}
-				traceArgs["variances"] = formatted
-				popFn()
-			}()
+	if links.variances != nil {
+		if links.provisionalRoot != 0 {
+			c.noteVarianceDependency(links.provisionalRoot)
 		}
-		stackIndex := c.getVarianceStackIndex(symbol)
-		if stackIndex < 0 {
-			saveResolutionStart := c.resolutionStart
-			if len(c.varianceStack) == 0 {
-				c.resolutionStart = len(c.typeResolutions)
+		return links.variances
+	}
+	stackIndex := c.getVarianceStackIndex(symbol)
+	if stackIndex >= 0 {
+		// We've detected a circularity. As soon as we see one, we measure from the "smallest" symbol
+		// in the circular part of the stack, with nothing below it, if that isn't where it was
+		// entered. That part of the stack may not be the whole region, so the region is made
+		// canonical again when its root completes; this first restart keeps the point at which type
+		// resolutions see a circularity where it has always been.
+		minIndex := stackIndex
+		for i := stackIndex + 1; i < len(c.varianceStack); i++ {
+			if c.compareSymbols(c.varianceStack[i].symbol, c.varianceStack[minIndex].symbol) < 0 {
+				minIndex = i
 			}
-			c.varianceStack = append(c.varianceStack, VarianceStackEntry{symbol, typeParameters})
-			variances := make([]VarianceFlags, len(typeParameters))
-			for i, tp := range typeParameters {
-				modifiers := c.getTypeParameterModifiers(tp)
-				var variance VarianceFlags
-				switch {
-				case modifiers&ast.ModifierFlagsOut != 0:
-					if modifiers&ast.ModifierFlagsIn != 0 {
-						variance = VarianceFlagsInvariant
-					} else {
-						variance = VarianceFlagsCovariant
-					}
-				case modifiers&ast.ModifierFlagsIn != 0:
-					variance = VarianceFlagsContravariant
-				default:
-					saveReliabilityFlags := c.reliabilityFlags
-					c.reliabilityFlags = 0
-					// We first compare instantiations where the type parameter is replaced with
-					// marker types that have a known subtype relationship. From this we can infer
-					// invariance, covariance, contravariance or bivariance.
-					typeWithSuper := c.createMarkerType(symbol, tp, c.markerSuperType)
-					typeWithSub := c.createMarkerType(symbol, tp, c.markerSubType)
-					variance = core.IfElse(c.isTypeAssignableTo(typeWithSub, typeWithSuper), VarianceFlagsCovariant, 0) |
-						core.IfElse(c.isTypeAssignableTo(typeWithSuper, typeWithSub), VarianceFlagsContravariant, 0)
-					// If the instantiations appear to be related bivariantly it may be because the
-					// type parameter is independent (i.e. it isn't witnessed anywhere in the generic
-					// type). To determine this we compare instantiations where the type parameter is
-					// replaced with marker types that are known to be unrelated.
-					if variance == VarianceFlagsBivariant && c.isTypeAssignableTo(c.createMarkerType(symbol, tp, c.markerOtherType), typeWithSuper) {
-						variance = VarianceFlagsIndependent
-					}
-					if c.reliabilityFlags&RelationComparisonResultReportsUnmeasurable != 0 {
-						variance |= VarianceFlagsUnmeasurable
-					}
-					if c.reliabilityFlags&RelationComparisonResultReportsUnreliable != 0 {
-						variance |= VarianceFlagsUnreliable
-					}
-					c.reliabilityFlags = saveReliabilityFlags
-				}
-				// If variance computation was restarted due to a circularity we may have already
-				// computed variances for this generic type. If so, we exit early.
-				if len(links.variances) != 0 {
-					break
-				}
-				variances[i] = variance
+		}
+		if minIndex > stackIndex {
+			c.restartVariances(c.varianceStack[minIndex])
+		}
+		// If the restart measured this type, that answer stands. Otherwise return an empty slice to
+		// mark that we can't compute variances for this type yet.
+		if links.variances != nil {
+			if links.provisionalRoot != 0 {
+				c.noteVarianceDependency(links.provisionalRoot)
 			}
-			// Store the results unless a restarted computation has already stored them.
-			if len(links.variances) == 0 {
-				links.variances = variances
+			return links.variances
+		}
+		c.noteVarianceDependency(c.varianceStack[stackIndex].serial)
+		return emptyVariances
+	}
+	var traceArgs map[string]any
+	if tr := c.tracer; tr != nil {
+		traceArgs = map[string]any{"arity": len(typeParameters), "id": c.getDeclaredTypeOfSymbol(symbol).id}
+		popFn := tr.Push(tracing.PhaseCheckTypes, "getVariancesWorker", traceArgs, true)
+		defer func() {
+			formatted := make([]string, len(links.variances))
+			for i, v := range links.variances {
+				formatted[i] = v.String()
 			}
-			c.varianceStack = c.varianceStack[:len(c.varianceStack)-1]
-			if len(c.varianceStack) == 0 {
-				c.resolutionStart = saveResolutionStart
+			traceArgs["variances"] = formatted
+			popFn()
+		}()
+	}
+	saveResolutionStart := c.resolutionStart
+	if len(c.varianceStack) == 0 {
+		c.resolutionStart = len(c.typeResolutions)
+	}
+	c.varianceSerial++
+	c.varianceStack = append(c.varianceStack, VarianceStackEntry{
+		symbol:           symbol,
+		typeParameters:   typeParameters,
+		serial:           c.varianceSerial,
+		lowLink:          c.varianceSerial,
+		provisionalStart: len(c.varianceProvisional),
+		relationLogStart: len(c.varianceRelationLog),
+	})
+	variances := make([]VarianceFlags, len(typeParameters))
+	for i, tp := range typeParameters {
+		modifiers := c.getTypeParameterModifiers(tp)
+		var variance VarianceFlags
+		switch {
+		case modifiers&ast.ModifierFlagsOut != 0:
+			if modifiers&ast.ModifierFlagsIn != 0 {
+				variance = VarianceFlagsInvariant
+			} else {
+				variance = VarianceFlagsCovariant
 			}
-		} else {
-			// We've detected a circularity. Since we may compute different variances depending on where
-			// we enter a circularity, we find the generic type with the "smallest" symbol in the circular
-			// region of the variance stack and restart the computation from there if necessary. This
-			// ensures stable results for circular generic types.
-			minIndex := stackIndex
-			for i := stackIndex + 1; i < len(c.varianceStack); i++ {
-				if c.compareSymbols(c.varianceStack[i].symbol, c.varianceStack[minIndex].symbol) < 0 {
-					minIndex = i
-				}
+		case modifiers&ast.ModifierFlagsIn != 0:
+			variance = VarianceFlagsContravariant
+		default:
+			saveReliabilityFlags := c.reliabilityFlags
+			c.reliabilityFlags = 0
+			// We first compare instantiations where the type parameter is replaced with
+			// marker types that have a known subtype relationship. From this we can infer
+			// invariance, covariance, contravariance or bivariance.
+			typeWithSuper := c.createMarkerType(symbol, tp, c.markerSuperType)
+			typeWithSub := c.createMarkerType(symbol, tp, c.markerSubType)
+			variance = core.IfElse(c.isTypeAssignableTo(typeWithSub, typeWithSuper), VarianceFlagsCovariant, 0) |
+				core.IfElse(c.isTypeAssignableTo(typeWithSuper, typeWithSub), VarianceFlagsContravariant, 0)
+			// If the instantiations appear to be related bivariantly it may be because the
+			// type parameter is independent (i.e. it isn't witnessed anywhere in the generic
+			// type). To determine this we compare instantiations where the type parameter is
+			// replaced with marker types that are known to be unrelated.
+			if variance == VarianceFlagsBivariant && c.isTypeAssignableTo(c.createMarkerType(symbol, tp, c.markerOtherType), typeWithSuper) {
+				variance = VarianceFlagsIndependent
 			}
-			if minIndex > stackIndex {
-				saveVarianceStack := c.varianceStack
-				c.varianceStack = nil
-				c.getVariancesWorker(saveVarianceStack[minIndex].symbol, saveVarianceStack[minIndex].typeParameters)
-				c.varianceStack = saveVarianceStack
+			if c.reliabilityFlags&RelationComparisonResultReportsUnmeasurable != 0 {
+				variance |= VarianceFlagsUnmeasurable
 			}
-			// Store an empty slice to mark that we can't compute variances for this type. We treat type
-			// parameters as co-variant in this case.
-			if len(links.variances) == 0 {
-				links.variances = []VarianceFlags{}
+			if c.reliabilityFlags&RelationComparisonResultReportsUnreliable != 0 {
+				variance |= VarianceFlagsUnreliable
 			}
+			c.reliabilityFlags = saveReliabilityFlags
+		}
+		// If a region was measured again from its smallest symbol while we were measuring, that
+		// measurement may already have stored this type's variances. If so, we exit early.
+		if links.variances != nil {
+			break
+		}
+		variances[i] = variance
+	}
+	entry := c.varianceStack[len(c.varianceStack)-1]
+	c.varianceStack = c.varianceStack[:len(c.varianceStack)-1]
+	if len(c.varianceStack) == 0 {
+		c.resolutionStart = saveResolutionStart
+	}
+	// A restart from a smaller symbol, run while this entry was open, may already have measured this
+	// type. Its answer stands, and this entry's own measurement is dropped.
+	measuredElsewhere := links.variances != nil
+	if !measuredElsewhere {
+		links.variances = variances
+	}
+	if entry.lowLink < entry.serial {
+		// The measurement depended on a region still open below this entry, so keep the result
+		// only for the rest of that region's measurement, and carry the dependency to the caller.
+		for _, member := range c.varianceProvisional[entry.provisionalStart:] {
+			c.varianceLinks.Get(member.symbol).provisionalRoot = entry.lowLink
+		}
+		if !measuredElsewhere {
+			links.provisionalRoot = entry.lowLink
+			c.varianceProvisional = append(c.varianceProvisional, VarianceStackEntry{symbol: symbol, typeParameters: typeParameters})
+		}
+		c.noteVarianceDependency(entry.lowLink)
+		return links.variances
+	}
+	// This entry is the root of its region, so every member of the region is known.
+	members := c.varianceProvisional[entry.provisionalStart:]
+	var smallest VarianceStackEntry
+	if !measuredElsewhere {
+		smallest = VarianceStackEntry{symbol: symbol, typeParameters: typeParameters}
+	}
+	for _, member := range members {
+		if smallest.symbol == nil || c.compareSymbols(member.symbol, smallest.symbol) < 0 {
+			smallest = member
 		}
 	}
-	return links.variances
+	// When the smallest symbol is already being restarted further up the call chain, this is part
+	// of that restart's measurement, which is the canonical one, so the region is kept as measured.
+	canonical := smallest.symbol == nil || smallest.symbol == symbol || slices.Contains(c.varianceRestarts, smallest.symbol)
+	for _, member := range members {
+		memberLinks := c.varianceLinks.Get(member.symbol)
+		memberLinks.provisionalRoot = 0
+		if !canonical {
+			memberLinks.variances = nil
+		}
+	}
+	c.varianceProvisional = c.varianceProvisional[:entry.provisionalStart]
+	if !canonical {
+		// Relation results cached during the measurement may rest on the discarded variances.
+		for _, logged := range c.varianceRelationLog[entry.relationLogStart:] {
+			delete(logged.relation.results, logged.key)
+		}
+	}
+	c.varianceRelationLog = c.varianceRelationLog[:entry.relationLogStart]
+	if canonical {
+		return links.variances
+	}
+	// The region was entered somewhere other than its smallest symbol. Measure it again from there,
+	// with nothing below it on the stack, so the variances don't depend on where it was entered.
+	if !measuredElsewhere {
+		links.variances = nil
+	}
+	c.restartVariances(smallest)
+	return c.getVariancesWorker(symbol, typeParameters)
+}
+
+// restartVariances measures a type's variances with nothing below it on the variance stack. A
+// restart hides the entries below it, so a type still being measured there can be reached and
+// measured again inside, and that can reach the same restart again. A restart of a type that is
+// already being restarted further up the call chain is skipped, which bounds the recursion.
+func (c *Checker) restartVariances(entry VarianceStackEntry) {
+	if slices.Contains(c.varianceRestarts, entry.symbol) {
+		return
+	}
+	c.varianceRestarts = append(c.varianceRestarts, entry.symbol)
+	saveVarianceStack := c.varianceStack
+	c.varianceStack = nil
+	c.getVariancesWorker(entry.symbol, entry.typeParameters)
+	c.varianceStack = saveVarianceStack
+	c.varianceRestarts = c.varianceRestarts[:len(c.varianceRestarts)-1]
+}
+
+func (c *Checker) noteVarianceDependency(serial uint64) {
+	if len(c.varianceStack) != 0 {
+		entry := &c.varianceStack[len(c.varianceStack)-1]
+		entry.lowLink = min(entry.lowLink, serial)
+	}
 }
 
 func (c *Checker) getVarianceStackIndex(symbol *ast.Symbol) int {
@@ -1455,12 +1566,42 @@ func (c *Checker) createMarkerType(symbol *ast.Symbol, source *Type, target *Typ
 	} else {
 		result = c.createTypeReference(t, c.instantiateTypes(t.AsInterfaceType().TypeParameters(), mapper))
 	}
-	c.markerTypes.Add(result)
+	if c.markerTypes == nil {
+		c.markerTypes = make(map[*Type][]*ast.Symbol)
+	}
+	// The markers of a variance annotation check are made from their own marker type parameters,
+	// which nothing else instantiates with, so they are recorded without a symbol and are always
+	// markers.
+	owner := symbol
+	if target == c.markerSubTypeForCheck || target == c.markerSuperTypeForCheck {
+		owner = nil
+	}
+	if !slices.Contains(c.markerTypes[result], owner) {
+		c.markerTypes[result] = append(c.markerTypes[result], owner)
+	}
 	return result
 }
 
+// isMarkerType reports whether t is a marker type of a variance annotation check, or of a generic
+// type whose variances are being measured right now, one on the variance stack. Marker types share
+// their marker type parameters, so instantiating another generic with its own markers can produce
+// the identical type, and a marker outlives its measurement. A marker of a generic measured earlier
+// is an ordinary reference, since counting it would make whether a reference is compared
+// structurally depend on what was measured before. A marker of a generic further down the stack is
+// compared structurally, as always, but that stands in for a circular reference to it, so it is
+// recorded as a dependency on that entry.
 func (c *Checker) isMarkerType(t *Type) bool {
-	return c.markerTypes.Has(t)
+	result := false
+	for _, owner := range c.markerTypes[t] {
+		if owner == nil {
+			return true
+		}
+		if stackIndex := c.getVarianceStackIndex(owner); stackIndex >= 0 {
+			c.noteVarianceDependency(c.varianceStack[stackIndex].serial)
+			result = true
+		}
+	}
+	return result
 }
 
 func (c *Checker) getTypeParameterModifiers(tp *Type) ast.ModifierFlags {
@@ -3191,7 +3332,7 @@ func (r *Relater) recursiveTypeRelatedTo(source *Type, target *Type, reportError
 	} else {
 		// A false result goes straight into global cache (when something is false under
 		// assumptions it will also be false without assumptions)
-		r.relation.set(id, RelationComparisonResultFailed|propagatingVarianceFlags)
+		r.c.setRelationResult(r.relation, id, RelationComparisonResultFailed|propagatingVarianceFlags)
 		r.relationCount--
 		r.resetMaybeStack(maybeStart, propagatingVarianceFlags, false)
 	}
@@ -3202,7 +3343,7 @@ func (r *Relater) resetMaybeStack(maybeStart int, propagatingVarianceFlags Relat
 	for i := maybeStart; i < len(r.maybeKeys); i++ {
 		r.maybeKeysSet.Delete(r.maybeKeys[i])
 		if markAllAsSucceeded {
-			r.relation.set(r.maybeKeys[i], RelationComparisonResultSucceeded|propagatingVarianceFlags)
+			r.c.setRelationResult(r.relation, r.maybeKeys[i], RelationComparisonResultSucceeded|propagatingVarianceFlags)
 			r.relationCount--
 		}
 	}

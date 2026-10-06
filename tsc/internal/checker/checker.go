@@ -544,9 +544,22 @@ type WideningContext struct {
 }
 
 type VarianceStackEntry struct {
-	symbol         *ast.Symbol
-	typeParameters []*Type
+	symbol           *ast.Symbol
+	typeParameters   []*Type
+	serial           uint64 // The order this entry was pushed in, starting at 1
+	lowLink          uint64 // The serial of the oldest entry this entry's measurement depended on while it was open
+	provisionalStart int    // The length of varianceProvisional when this entry was pushed
+	relationLogStart int    // The length of varianceRelationLog when this entry was pushed
 }
+
+// VarianceRelationEntry is a relation result cached while a variance was being measured, kept so it
+// can be forgotten if the variances it was computed against are discarded.
+type VarianceRelationEntry struct {
+	relation *Relation
+	key      CacheHashKey
+}
+
+var emptyVariances = []VarianceFlags{}
 
 const maxSerializationLevel = 2
 
@@ -645,7 +658,7 @@ type Checker struct {
 	reverseMappedCache                          map[ReverseMappedTypeKey]*Type
 	reverseHomomorphicMappedCache               map[ReverseMappedTypeKey]*Type
 	iterationTypesCache                         map[IterationTypesKey]IterationTypes
-	markerTypes                                 collections.Set[*Type]
+	markerTypes                                 map[*Type][]*ast.Symbol
 	resolvingExplicitTypeOfSymbol               collections.Set[*ast.Symbol]
 	undefinedSymbol                             *ast.Symbol
 	argumentsSymbol                             *ast.Symbol
@@ -796,6 +809,10 @@ type Checker struct {
 	typeResolutions                             []TypeResolution
 	resolutionStart                             int
 	varianceStack                               []VarianceStackEntry
+	varianceSerial                              uint64
+	varianceProvisional                         []VarianceStackEntry
+	varianceRelationLog                         []VarianceRelationEntry
+	varianceRestarts                            []*ast.Symbol
 	callResolutionStack                         []*ast.Node
 	apparentArgumentCount                       *int
 	lastGetCombinedNodeFlagsNode                *ast.Node

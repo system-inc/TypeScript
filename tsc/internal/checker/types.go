@@ -305,7 +305,8 @@ type SpreadLinks struct {
 // Links for variances of type aliases and interface types
 
 type VarianceLinks struct {
-	variances []VarianceFlags
+	variances       []VarianceFlags
+	provisionalRoot uint64 // While non-zero, variances were measured inside a region still open at the variance stack entry with this serial
 }
 
 type VarianceFlags uint32
